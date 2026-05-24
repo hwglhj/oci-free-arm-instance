@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Cache pip packages
         id: cache-pip
-        uses: actions/cache@v4
+        uses: actions/cache@v3
         with:
           path: ~/.local
           key: ${{ runner.os }}-pip-oci-cli-v1
@@ -74,19 +74,22 @@ jobs:
             exit 1
           fi
 
-      - name: Send Discord Notification
+      - name: Send Bark Notification
         if: always()
-        uses: sarisia/actions-status-discord@v1.15.4
-        with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          description: |
-            Attempt to create A1.Flex VM.
-            **Status:** `${{ steps.create_vm.outcome }}`
-
-            **Log Output:**
-            ```json
-            ${{ steps.create_vm.outputs.log_data }}
-            ```
+        continue-on-error: true
+        run: |
+          if [ -z "${{ secrets.BARK_URL }}" ]; then
+            echo "Bark URL not configured, skipping notification"
+            exit 0
+          fi
+          
+          STATUS="${{ steps.create_vm.outcome }}"
+          TITLE="OCI%20VM%20Creation"
+          
+          if [ "$STATUS" = "success" ]; then
+            BODY="VM%20creation%20attempt%20SUCCESSFUL!%20Check%20OCI%20console."
+          else
+            BODY="VM%20creation%20attempt%20FAILED.%20Retrying%20in%205%20minutes."
+          fi
+          
+          curl -X POST "${{ secrets.BARK_URL }}/push?title=${TITLE}&body=${BODY}&badge=1"
