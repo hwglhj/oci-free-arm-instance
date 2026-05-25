@@ -45,62 +45,41 @@ jobs:
           
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # 2. 运行创建命令，将结果保存到临时文件，避免复杂的管道输出截断
+          # 2. 严格的前置变量空值检查，防止空变量导致 400 错误
+          if [ -z "$COMPARTMENT_ID" ] || [ -z "$AD_NAME" ] || [ -z "$SUBNET_ID" ] || [ -z "$IMAGE_ID" ]; then
+            echo "错误: 检测到核心 OCI 配置变量（COMPARTMENT_ID, AD_NAME, SUBNET_ID, IMAGE_ID）存在空值！"
+            echo "请检查 GitHub Secrets 是否正确配置。"
+            exit 1
+          fi
+
+          # 3. 运行创建命令 (优化了 --shape-config 的转义，并临时注释引导卷大小做测试)
           echo "正在尝试申请甲骨文 ARM 实例..."
           oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --shape-config "{\"ocpus\":4,\"memoryInGBs\":24}" \
             --subnet-id "$SUBNET_ID" \
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
-            --display-name "test" \
-            --boot-volume-size-in-gbs 200 > oci_output.log 2>&1 || true
+            --display-name "test" > oci_output.log 2>&1 || true
+            # 如果确认变量没错后依然 400，可以尝试把下面这行加回去
+            # --boot-volume-size-in-gbs 200 
 
-          # 打印日志到 GitHub Actions 控制台以便排查
+          # 打印日志到控制台
           cat oci_output.log
 
-          # 3. 多行安全写入 GITHUB_OUTPUT
+          # 4. 多行安全写入 GITHUB_OUTPUT
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
           cat oci_output.log >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # 4. 判断是否成功
+          # 5. 判断是否成功
           if grep -q '"lifecycle-state": "PROVISIONING"' oci_output.log; then
             echo "Success! 'PROVISIONING' 状态已找到。"
             exit 0
           else
-            echo "Error: 没抢到服务器（或发生其他错误）。"
+            echo "Error: 未成功创建实例。"
             exit 1
           fi
-
-      - name: Send Bark Notification
-        if: always()
-        continue-on-error: true
-        run: |
-          # 确保配置了 BARK_URL
-          BARK_BASE_URL="${{ secrets.BARK_URL }}"
-          if [ -z "$BARK_BASE_URL" ]; then
-            echo "Bark URL 未配置，跳过通知"
-            exit 0
-          fi
-
-          STATUS="${{ steps.create_vm.outcome }}"
-          TITLE="OCI VM 状态"
-          
-          if [ "$STATUS" = "success" ]; then
-            BODY="云服务器创建成功！请前往 OCI 控制台查看"
-            GROUP="Oracle_Success"
-          else
-            BODY="云服务器创建失败，5 分钟后自动重试"
-            GROUP="Oracle_Fail"
-          fi
-
-          # 使用 --data-urlencode 安全传递参数，彻底避免 curl (3) URL rejected 错误
-          curl -f -X POST "$BARK_BASE_URL/push" \
-            --data-urlencode "title=$TITLE" \
-            --data-urlencode "body=$BODY" \
-            --data-urlencode "group=$GROUP" \
-            -d "badge=1"
