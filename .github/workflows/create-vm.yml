@@ -1,10 +1,11 @@
 name: Try to Create OCI VM
-# It will run every 5 minutes.
+
 on:
   schedule:
+    # 每 5 分钟运行一次
     - cron: "*/5 * * * *"
-  # Allows you to manually run this workflow from the Actions tab
   workflow_dispatch:
+
 env:
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   IMAGE_ID: ${{ secrets.IMAGE_ID }}
@@ -20,24 +21,17 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Cache pip packages
-        id: cache-pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.local
-          key: ${{ runner.os }}-pip-oci-cli-v1
-
-      - name: Add OCI CLI to path
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      # 移除可能带来 CLI 版本滞后的 cache，直接每次全新安装（大约只需十几秒）
+      - name: Install OCI CLI
+        run: |
+          pip install oci-cli
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Setup OCI CLI and Try to Create VM
         id: create_vm
         continue-on-error: true 
         run: |
-          set -o pipefail
-
-          pip install oci-cli
-
+          # 1. 配置 OCI 证书
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
@@ -48,9 +42,12 @@ jobs:
           echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
           echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
           echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
+          
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          OCI_OUTPUT=$(oci compute instance launch \
+          # 2. 运行创建命令，将结果保存到临时文件，避免复杂的管道输出截断
+          echo "正在尝试申请甲骨文 ARM 实例..."
+          oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
@@ -60,17 +57,22 @@ jobs:
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "test" \
-            --boot-volume-size-in-gbs 200 2>&1 || true)
+            --boot-volume-size-in-gbs 200 > oci_output.log 2>&1 || true
 
+          # 打印日志到 GitHub Actions 控制台以便排查
+          cat oci_output.log
+
+          # 3. 多行安全写入 GITHUB_OUTPUT
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
+          cat oci_output.log >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "Success! 'PROVISIONING' state found in output."
+          # 4. 判断是否成功
+          if grep -q '"lifecycle-state": "PROVISIONING"' oci_output.log; then
+            echo "Success! 'PROVISIONING' 状态已找到。"
             exit 0
           else
-            echo "Error: Success string not found in OCI output. Failing the step."
+            echo "Error: 没抢到服务器（或发生其他错误）。"
             exit 1
           fi
 
@@ -78,16 +80,27 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          if [ -z "${{ secrets.BARK_URL }}" ]; then
-            echo "Bark URL not configured, skipping notification"
+          # 确保配置了 BARK_URL
+          BARK_BASE_URL="${{ secrets.BARK_URL }}"
+          if [ -z "$BARK_BASE_URL" ]; then
+            echo "Bark URL 未配置，跳过通知"
             exit 0
           fi
+
           STATUS="${{ steps.create_vm.outcome }}"
-          TITLE="OCI%20VM%20状态" # 这里可以自行修改推送标题
+          TITLE="OCI VM 状态"
+          
           if [ "$STATUS" = "success" ]; then
             BODY="云服务器创建成功！请前往 OCI 控制台查看"
+            GROUP="Oracle_Success"
           else
             BODY="云服务器创建失败，5 分钟后自动重试"
+            GROUP="Oracle_Fail"
           fi
-          curl -X POST "${{ secrets.BARK_URL }}/push?title=${TITLE}&body=${BODY}&badge=1"
- 
+
+          # 使用 --data-urlencode 安全传递参数，彻底避免 curl (3) URL rejected 错误
+          curl -f -X POST "$BARK_BASE_URL/push" \
+            --data-urlencode "title=$TITLE" \
+            --data-urlencode "body=$BODY" \
+            --data-urlencode "group=$GROUP" \
+            -d "badge=1"
