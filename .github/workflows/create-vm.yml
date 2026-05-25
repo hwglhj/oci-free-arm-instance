@@ -74,22 +74,13 @@ jobs:
             exit 1
           fi
 
-      - name: Send Bark Notification
-        if: always()
-        continue-on-error: true
+      - name: Send Bark Notification on Success Only
+        if: steps.create_vm.outcome == 'success'
         run: |
           if [ -z "${{ secrets.BARK_URL }}" ]; then
             echo "Bark URL not configured, skipping notification"
             exit 0
           fi
-          
-          STATUS="${{ steps.create_vm.outcome }}"
-          TITLE="OCI%20VM%20Creation"
-          
-          if [ "$STATUS" = "success" ]; then
-            BODY="VM%20creation%20attempt%20SUCCESSFUL!%20Check%20OCI%20console."
-          else
-            BODY="VM%20creation%20attempt%20FAILED.%20Retrying%20in%205%20minutes."
-          fi
-          
+          TITLE="OCI%20VM%20状态"
+          BODY="云服务器创建成功！请前往OCI控制台查看。"
           curl -X POST "${{ secrets.BARK_URL }}/push?title=${TITLE}&body=${BODY}&badge=1"
