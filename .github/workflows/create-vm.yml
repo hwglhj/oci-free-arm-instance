@@ -65,7 +65,6 @@ jobs:
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
           echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "$OCI_OUTPUT"
 
           if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
             echo "Success! 'PROVISIONING' state found in output."
@@ -75,13 +74,20 @@ jobs:
             exit 1
           fi
 
-      - name: Send Bark Notification on Success Only
-        if: steps.create_vm.outcome == 'success'
+      - name: Send Bark Notification
+        if: always()
+        continue-on-error: true
         run: |
           if [ -z "${{ secrets.BARK_URL }}" ]; then
             echo "Bark URL not configured, skipping notification"
             exit 0
           fi
-          TITLE="OCI%20VM%20状态"
-          BODY="云服务器创建成功！请前往OCI控制台查看。"
+          STATUS="${{ steps.create_vm.outcome }}"
+          TITLE="OCI%20VM%20状态" # 这里可以自行修改推送标题
+          if [ "$STATUS" = "success" ]; then
+            BODY="云服务器创建成功！请前往 OCI 控制台查看"
+          else
+            BODY="云服务器创建失败，5 分钟后自动重试"
+          fi
           curl -X POST "${{ secrets.BARK_URL }}/push?title=${TITLE}&body=${BODY}&badge=1"
+ 
