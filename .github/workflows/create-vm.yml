@@ -31,7 +31,20 @@ jobs:
         id: create_vm
         continue-on-error: true 
         run: |
-          # 1. 配置 OCI 证书
+          # 1. 净化核心变量：强制剔除首尾的换行符(\n)、回车符(\r)和空格
+          # 这是解决 400 CannotParseRequest 最关键的一步！
+          CLEAN_COMPARTMENT=$(echo "$COMPARTMENT_ID" | tr -d '\n\r ')
+          CLEAN_AD_NAME=$(echo "$AD_NAME" | tr -d '\n\r ')
+          CLEAN_SUBNET=$(echo "$SUBNET_ID" | tr -d '\n\r ')
+          CLEAN_IMAGE=$(echo "$IMAGE_ID" | tr -d '\n\r ')
+
+          # 校验是否为空
+          if [ -z "$CLEAN_COMPARTMENT" ] || [ -z "$CLEAN_AD_NAME" ] || [ -z "$CLEAN_SUBNET" ] || [ -z "$CLEAN_IMAGE" ]; then
+            echo "错误: 检测到核心 OCI 配置变量存在空值，请检查 Secrets！"
+            exit 1
+          fi
+
+          # 2. 配置 OCI 证书
           mkdir -p ~/.oci
           echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
           chmod 600 ~/.oci/oci_api_key.pem
@@ -45,37 +58,31 @@ jobs:
           
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # 2. 严格的前置变量空值检查，防止空变量导致 400 错误
-          if [ -z "$COMPARTMENT_ID" ] || [ -z "$AD_NAME" ] || [ -z "$SUBNET_ID" ] || [ -z "$IMAGE_ID" ]; then
-            echo "错误: 检测到核心 OCI 配置变量（COMPARTMENT_ID, AD_NAME, SUBNET_ID, IMAGE_ID）存在空值！"
-            echo "请检查 GitHub Secrets 是否正确配置。"
-            exit 1
-          fi
+          # 3. 将 Shape Config 写入独立文件，彻底避开命令行 JSON 转义丢失的坑
+          echo '{"ocpus":4,"memoryInGBs":24}' > shape_config.json
 
-          # 3. 运行创建命令 (优化了 --shape-config 的转义，并临时注释引导卷大小做测试)
+          # 4. 运行创建命令，使用 file:// 语法读取配置，并使用净化后的变量
           echo "正在尝试申请甲骨文 ARM 实例..."
           oci compute instance launch \
-            --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "$AD_NAME" \
+            --compartment-id "$CLEAN_COMPARTMENT" \
+            --availability-domain "$CLEAN_AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
-            --shape-config "{\"ocpus\":4,\"memoryInGBs\":24}" \
-            --subnet-id "$SUBNET_ID" \
-            --image-id "$IMAGE_ID" \
+            --shape-config file://shape_config.json \
+            --subnet-id "$CLEAN_SUBNET" \
+            --image-id "$CLEAN_IMAGE" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "test" > oci_output.log 2>&1 || true
-            # 如果确认变量没错后依然 400，可以尝试把下面这行加回去
-            # --boot-volume-size-in-gbs 200 
 
           # 打印日志到控制台
           cat oci_output.log
 
-          # 4. 多行安全写入 GITHUB_OUTPUT
+          # 5. 多行安全写入 GITHUB_OUTPUT
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
           cat oci_output.log >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # 5. 判断是否成功
+          # 6. 判断是否成功
           if grep -q '"lifecycle-state": "PROVISIONING"' oci_output.log; then
             echo "Success! 'PROVISIONING' 状态已找到。"
             exit 0
@@ -83,3 +90,32 @@ jobs:
             echo "Error: 未成功创建实例。"
             exit 1
           fi
+          
+      - name: Send Bark Notification
+        if: always()
+        continue-on-error: true
+        run: |
+          # 确保配置了 BARK_URL
+          BARK_BASE_URL="${{ secrets.BARK_URL }}"
+          if [ -z "$BARK_BASE_URL" ]; then
+            echo "Bark URL 未配置，跳过通知"
+            exit 0
+          fi
+
+          STATUS="${{ steps.create_vm.outcome }}"
+          TITLE="OCI VM 状态"
+          
+          if [ "$STATUS" = "success" ]; then
+            BODY="云服务器创建成功！请前往 OCI 控制台查看"
+            GROUP="Oracle_Success"
+          else
+            BODY="云服务器创建失败，5 分钟后自动重试"
+            GROUP="Oracle_Fail"
+          fi
+
+          # 使用 --data-urlencode 安全传递参数，彻底避免 curl (3) URL rejected 错误
+          curl -f -X POST "$BARK_BASE_URL/push" \
+            --data-urlencode "title=$TITLE" \
+            --data-urlencode "body=$BODY" \
+            --data-urlencode "group=$GROUP" \
+            -d "badge=1"
