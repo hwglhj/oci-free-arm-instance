@@ -95,27 +95,35 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          # 确保配置了 BARK_URL
           BARK_BASE_URL="${{ secrets.BARK_URL }}"
+          
+          # 自动清理 URL 末尾可能多余的斜杠或 /push，确保纯净
+          BARK_BASE_URL=$(echo "$BARK_BASE_URL" | sed 's/\/$//' | sed 's/\/push$//')
+          
           if [ -z "$BARK_BASE_URL" ]; then
             echo "Bark URL 未配置，跳过通知"
             exit 0
           fi
 
           STATUS="${{ steps.create_vm.outcome }}"
-          TITLE="OCI VM 状态"
+          TITLE="OCI VM 抢购状态"
           
           if [ "$STATUS" = "success" ]; then
-            BODY="云服务器创建成功！请前往 OCI 控制台查看"
+            BODY="🎉 凤凰城 ARM 云服务器创建成功！赶紧登录 OCI 控制台查看！"
             GROUP="Oracle_Success"
+            
+            # 使用标准的 JSON 格式发送，彻底解决文本被截断或变 "push" 的问题
+            curl -s -X POST "$BARK_BASE_URL" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{
+                \"title\": \"$TITLE\",
+                \"body\": \"$BODY\",
+                \"group\": \"$GROUP\",
+                \"sound\": \"minuet\",
+                \"badge\": 1
+              }"
+            echo "成功通知已发送至手机！"
           else
-            BODY="云服务器创建失败，5 分钟后自动重试"
-            GROUP="Oracle_Fail"
+            # 失败（容量不足）时仅在日志记录，不发送弹窗，避免每天几百条通知轰炸
+            echo "当前状态: 暂无库存 (Out of host capacity)。不发送推送以免打扰，系统将在 5 分钟后自动重试。"
           fi
-
-          # 使用 --data-urlencode 安全传递参数，彻底避免 curl (3) URL rejected 错误
-          curl -f -X POST "$BARK_BASE_URL/push" \
-            --data-urlencode "title=$TITLE" \
-            --data-urlencode "body=$BODY" \
-            --data-urlencode "group=$GROUP" \
-            -d "badge=1"
