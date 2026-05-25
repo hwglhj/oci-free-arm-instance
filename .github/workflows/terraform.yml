@@ -1,1 +1,35 @@
-<div> <div style="margin-bottom: 20px;"> <h3 style="margin-top: 0;">📍 网页端精准查找路径指南 (us-phoenix-1)</h3> <ol> <li>登录 OCI 控制台并切换区域至 <b>us-phoenix-1</b>。</li> <li>在侧边栏导航：<strong>计算 (Compute)</strong> &gt; <strong>映像 (Images)</strong>。</li> <li>选择 <strong>平台映像 (Platform Images)</strong> 选项卡。</li> <li>在列表中搜索 <strong>Ubuntu 22.04</strong>。</li> <li>点击映像名称，复制右侧的 <strong>OCID</strong> 字符串。</li> </ol> </div> <div style="margin-bottom: 20px;"> <h3>💻 CLI 自动化一键查询脚本</h3> <div style="background: var(--surface-container-highest); padding: 12px; border-radius: 4px; font-family: monospace; border-left: 4px solid var(--primary); word-break: break-all;"> oci compute image list <br/> --region us-phoenix-1 <br/> --operating-system "Ubuntu 22.04" <br/> --all <br/> --query "data[0].id" </div> <p style="font-size: 0.85em; color: var(--on-surface-variant); margin-top: 8px;"> * 请确保已配置 OCI CLI 环境或在 GitHub Action 运行环境中执行。 </p> </div> </div>
+- name: 侦察任务：获取凤凰城真实 ID
+        id: query_ids
+        run: |
+          # 1. 配置 OCI 证书 (必须保留，用于登录)
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          # 强制将区域设置为凤凰城
+          echo "region=us-phoenix-1" >> ~/.oci/config 
+
+          # 2. 查询凤凰城的 Ubuntu 22.04 ARM 镜像
+          echo "=================================================="
+          echo "正在查询凤凰城 (us-phoenix-1) 的可用镜像列表..."
+          oci compute image list \
+            --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
+            --operating-system "Canonical Ubuntu" \
+            --operating-system-version "22.04" \
+            --shape "VM.Standard.A1.Flex" \
+            --all \
+            --query "data[*].{Name:\"display-name\", ID:id}" \
+            --output table
+
+          # 3. 查询你账号在凤凰城的专属 AD Name
+          echo "=================================================="
+          echo "正在查询凤凰城 (us-phoenix-1) 的 AD Name..."
+          oci iam availability-domain list \
+            --compartment-id "${{ secrets.OCI_COMPARTMENT_ID }}" \
+            --query "data[*].{Name:name}" \
+            --output table
