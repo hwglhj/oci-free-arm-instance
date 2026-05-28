@@ -1,0 +1,129 @@
+name: Try to Create OCI VM4
+
+on:
+  schedule:
+    # 每 5 分钟运行一次
+    - cron: "10-59/15 * * * *"
+  workflow_dispatch:
+
+env:
+  COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  IMAGE_ID: ${{ secrets.IMAGE_ID }}
+  SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+  AD_NAME: ${{ secrets.AD_NAME }}
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+  OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+  OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+  OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 移除可能带来 CLI 版本滞后的 cache，直接每次全新安装（大约只需十几秒）
+      - name: Install OCI CLI
+        run: |
+          pip install oci-cli
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup OCI CLI and Try to Create VM
+        id: create_vm
+        continue-on-error: true 
+        run: |
+          # 1. 净化核心变量：强制剔除首尾的换行符(\n)、回车符(\r)和空格
+          # 这是解决 400 CannotParseRequest 最关键的一步！
+          CLEAN_COMPARTMENT=$(echo "$COMPARTMENT_ID" | tr -d '\n\r ')
+          CLEAN_AD_NAME=$(echo "$AD_NAME" | tr -d '\n\r ')
+          CLEAN_SUBNET=$(echo "$SUBNET_ID" | tr -d '\n\r ')
+          CLEAN_IMAGE=$(echo "$IMAGE_ID" | tr -d '\n\r ')
+
+          # 校验是否为空
+          if [ -z "$CLEAN_COMPARTMENT" ] || [ -z "$CLEAN_AD_NAME" ] || [ -z "$CLEAN_SUBNET" ] || [ -z "$CLEAN_IMAGE" ]; then
+            echo "错误: 检测到核心 OCI 配置变量存在空值，请检查 Secrets！"
+            exit 1
+          fi
+
+          # 2. 配置 OCI 证书
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
+          
+          echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
+
+          # 3. 将 Shape Config 写入独立文件，彻底避开命令行 JSON 转义丢失的坑
+          echo '{"ocpus":4,"memoryInGBs":24}' > shape_config.json
+
+          # 4. 运行创建命令，使用 file:// 语法读取配置，并使用净化后的变量
+          echo "正在尝试申请甲骨文 ARM 实例..."
+          oci compute instance launch \
+            --compartment-id "$CLEAN_COMPARTMENT" \
+            --availability-domain "$CLEAN_AD_NAME" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config file://shape_config.json \
+            --subnet-id "$CLEAN_SUBNET" \
+            --image-id "$CLEAN_IMAGE" \
+            --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+            --assign-public-ip true \
+            --display-name "test" > oci_output.log 2>&1 || true
+
+          # 打印日志到控制台
+          cat oci_output.log
+
+          # 5. 多行安全写入 GITHUB_OUTPUT
+          echo "log_data<<EOF" >> $GITHUB_OUTPUT
+          cat oci_output.log >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # 6. 判断是否成功
+          if grep -q '"lifecycle-state": "PROVISIONING"' oci_output.log; then
+            echo "Success! 'PROVISIONING' 状态已找到。"
+            exit 0
+          else
+            echo "Error: 未成功创建实例。"
+            exit 1
+          fi
+          
+      - name: Send Bark Notification
+        if: always()
+        continue-on-error: true
+        run: |
+          BARK_BASE_URL="${{ secrets.BARK_URL }}"
+          
+          # 自动清理 URL 末尾可能多余的斜杠或 /push，确保纯净
+          BARK_BASE_URL=$(echo "$BARK_BASE_URL" | sed 's/\/$//' | sed 's/\/push$//')
+          
+          if [ -z "$BARK_BASE_URL" ]; then
+            echo "Bark URL 未配置，跳过通知"
+            exit 0
+          fi
+
+          STATUS="${{ steps.create_vm.outcome }}"
+          TITLE="OCI VM 抢购状态"
+          
+          if [ "$STATUS" = "success" ]; then
+            BODY="🎉 凤凰城 ARM 云服务器创建成功！赶紧登录 OCI 控制台查看！"
+            GROUP="Oracle_Success"
+            
+            # 使用标准的 JSON 格式发送，彻底解决文本被截断或变 "push" 的问题
+            curl -s -X POST "$BARK_BASE_URL" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{
+                \"title\": \"$TITLE\",
+                \"body\": \"$BODY\",
+                \"group\": \"$GROUP\",
+                \"sound\": \"minuet\",
+                \"badge\": 1
+              }"
+            echo "成功通知已发送至手机！"
+          else
+            # 失败（容量不足）时仅在日志记录，不发送弹窗，避免每天几百条通知轰炸
+            echo "当前状态: 暂无库存 (Out of host capacity)。不发送推送以免打扰，系统将在 5 分钟后自动重试。"
+          fi
